@@ -140,4 +140,4 @@ class NeuroGenesisSingularityV40_04:
             if random.random() < 0.46:
                 self.neuron_population[i] = best * (1 + np.random.normal(0, 0.068, self.dim))
         if self.generation % 8 == 0 and len(self.neuron_population) < 30:
-            self.neuron_population.append(np
+           self.neuron_population.append(np.random.randn(self.dim) * 0.1)
