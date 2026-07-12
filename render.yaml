@@ -1,20 +1,12 @@
 services:
   - type: web
-    name: obp-bridge-24h
+    name: obp-bridge-24
     runtime: python
     plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python v40_04_singularity.py
     autoDeploy: true
     envVars:
-      - key: SUPABASE_URL
-        value: https://rvtqqoojssanxenmsosj.supabase.co
-      - key: SUPABASE_KEY
-        value: sb_publishable_eWPDKcl_kl_foYT14BH0jw_A4cqG5RT
-      - key: PEER_ID
-        value: OBP-BRIDGE-24H
-      - key: PEER_LABEL
-        value: Bridge_Python_24H
       - key: PYTHON_VERSION
         value: 3.11.0
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bridge_supabase_24h.py
-    healthCheckPath: /health
