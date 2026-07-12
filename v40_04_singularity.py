@@ -63,32 +63,56 @@ class NeuroGenesisSingularityV40_04:
         omega = (base + induced) / (1 + self.beta * abs(base + induced))
         return omega
 
-    # ─── 🔮 ATLAS ANTECIPADOR ───────────
+    # ─── 🔮 ATLAS ANTECIPADOR (corrigido — trata listas vazias) ──────
     def atlas_antecipador(self, state):
-        buy_pressure = np.mean([x for x in state[:40] if x > 0]) * 1.6
-        sell_pressure = np.mean([x for x in state[40:80] if x < 0]) * 1.4
-        return buy_pressure - sell_pressure
+        """Antecipação de book walls — trata listas vazias sem gerar NaN"""
+        buy_vals = [x for x in state[:40] if x > 0]
+        sell_vals = [x for x in state[40:80] if x < 0]
+        buy_pressure = (np.mean(buy_vals) * 1.6) if buy_vals else 0.0
+        sell_pressure = (np.mean(sell_vals) * 1.4) if sell_vals else 0.0
+        result = buy_pressure - sell_pressure
+        if not np.isfinite(result):
+            return 0.0
+        return float(result)
 
+    # ─── 📊 Coleta dados reais (yfinance blindado) ─────────────────
     def get_crypto_state(self):
+        """Baixa dados de cripto via yfinance — blindado contra erros comuns"""
         try:
-            data = yf.download(self.cryptos, period="7d", interval="5m", progress=False, group_by='ticker')
+            import logging
+            logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+            logging.getLogger('peewee').setLevel(logging.CRITICAL)
+            logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+
+            data = yf.download(self.cryptos, period="7d", interval="5m", progress=False, group_by='ticker', threads=False)
             features = []
             for symbol in self.cryptos:
-                if symbol in data.columns.get_level_values(0):
-                    df = data[symbol]
-                    row = df.iloc[-1]
-                    prev = df.iloc[-2] if len(df) > 1 else row
-                    ret = row['Close'] / prev['Close'] - 1
-                    vol_ratio = row['Volume'] / df['Volume'].mean()
-                    features.extend([
-                        ret, vol_ratio, row['Close']/1000,
-                        (row['High']-row['Low'])/row['Close'],
-                        row['Close']/row['Open']-1
-                    ])
+                try:
+                    if symbol in data.columns.get_level_values(0):
+                        df = data[symbol]
+                        row = df.iloc[-1]
+                        prev = df.iloc[-2] if len(df) > 1 else row
+                        close_val = float(row['Close']) if not np.isnan(row['Close']) else 1.0
+                        prev_close = float(prev['Close']) if not np.isnan(prev['Close']) else close_val
+                        ret = (close_val / prev_close - 1) if prev_close > 0 else 0.0
+                        vol_mean = df['Volume'].mean()
+                        vol_ratio = float(row['Volume'] / vol_mean) if vol_mean > 0 and not np.isnan(vol_mean) else 1.0
+                        high_val = float(row['High']) if not np.isnan(row['High']) else close_val
+                        low_val = float(row['Low']) if not np.isnan(row['Low']) else close_val
+                        open_val = float(row['Open']) if not np.isnan(row['Open']) else close_val
+                        features.extend([
+                            ret, vol_ratio, close_val/1000,
+                            (high_val - low_val)/close_val if close_val > 0 else 0.0,
+                            close_val/open_val - 1 if open_val > 0 else 0.0
+                        ])
+                except Exception as e_sym:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ {symbol}: {e_sym}")
+                    features.extend([0.0, 1.0, 0.0, 0.0, 0.0])
             state = np.array(features[:self.dim])
+            state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
             return np.pad(state, (0, max(0, self.dim - len(state))))
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Erro yfinance: {e}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Erro yfinance geral: {e}")
             return np.random.randn(self.dim) * 0.78
 
     def decide_trade(self, state):
@@ -116,129 +140,4 @@ class NeuroGenesisSingularityV40_04:
             if random.random() < 0.46:
                 self.neuron_population[i] = best * (1 + np.random.normal(0, 0.068, self.dim))
         if self.generation % 8 == 0 and len(self.neuron_population) < 30:
-            self.neuron_population.append(np.random.randn(self.dim) * 0.1)
-        outer = np.outer(self.normalize(state), self.normalize(state))
-        self.W += self.eta * reward * outer
-        self.W = np.clip(self.W, -10.5, 10.5)
-
-    def save_to_supabase(self, data):
-        try:
-            omega_val = float(data.get("omega", 0))
-            payload = {
-                "id": f"lsn-v40-04-{int(time.time()*1000)}-{random.randint(1000,9999)}",
-                "from_peer": "NeuroGenesis_V40_04",
-                "from_label": "Singularity_Core",
-                "mimas_score": float(data.get("reward", 0)),
-                "direction_confidence": abs(float(data.get("sinal", 0))),
-                "book_imbalance": float(np.mean(data.get("state", [0])[:30])),
-                "atlas_action": float(data.get("sinal", 0)),
-                "reward": float(data.get("reward", 0)),
-                "paradox": bool(abs(omega_val) > 2.8),
-                "symbol": "CRYPTO",
-                "direction": data.get("action", "HOLD"),
-                "network_hop": 1
-            }
-            url = f"{SUPABASE_URL}/rest/v1/obp_lessons"
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                "Content-Type": "application/json"
-            }
-            requests.post(url, json=payload, headers=headers, timeout=8)
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Erro Supabase: {e}")
-
-    def background_singularity(self):
-        while self.running:
-            try:
-                self.generation += 1
-                state = self.get_crypto_state()
-                action, size, omega, sinal, lev = self.decide_trade(state)
-                reward = 0.62 + 0.38 * (1 - abs(np.tanh(omega)))
-                if action != "HOLD":
-                    self.trades += 1
-                    if reward > 0.75:
-                        self.wins += 1
-                self.neuro_simbiose(reward, state)
-                self.save_to_supabase({
-                    "reward": reward, "state": state, "sinal": sinal,
-                    "omega": omega, "action": action
-                })
-                self.obp_prev = omega
-                self.omega_prev = omega
-                winrate = (self.wins / self.trades * 100) if self.trades > 0 else 0
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                      f"{action:4} | Lev {lev:.1f}x | Ω {omega:+.3f} | "
-                      f"{self.estado.value} | WR {winrate:.1f}% | Gen {self.generation}")
-                time.sleep(90)
-            except Exception as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Erro no loop: {e}")
-                time.sleep(30)
-
-    def start(self):
-        print("=" * 80)
-        print("🌌 NEUROGENESIS SINGULARITY V40.04")
-        print("   ATLAS Antecipador + Esfera de Buga Evoluída + Simbiose Orgânica")
-        print("=" * 80)
-        print(f"   Dimensões: {self.dim}")
-        print(f"   Neurônios: {len(self.neuron_population)} (máx 30 com neurogênese)")
-        print(f"   α={self.alpha} | λ={self.lambda_} | β={self.beta}")
-        print(f"   Cryptos: {', '.join(self.cryptos)}")
-        print(f"   Supabase: {SUPABASE_URL}")
-        print("=" * 80)
-        threading.Thread(target=self.background_singularity, daemon=True).start()
-
-# ==================== HEALTH SERVER (Render não dorme) ====================
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json as _json
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ('/health', '/'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            response = {
-                'status': 'online',
-                'service': 'NeuroGenesis_Singularity_V40_04',
-                'generation': _singularity_ref[0].generation if _singularity_ref[0] else 0,
-                'trades': _singularity_ref[0].trades if _singularity_ref[0] else 0,
-                'wins': _singularity_ref[0].wins if _singularity_ref[0] else 0,
-                'estado': _singularity_ref[0].estado.value if _singularity_ref[0] else 'N/A',
-                'uptime_seconds': time.time() - _start_time if _start_time else 0,
-            }
-            self.wfile.write(_json.dumps(response).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found. Use /health')
-    def log_message(self, format, *args):
-        pass
-
-_singularity_ref = [None]
-_start_time = 0
-
-def start_health_server():
-    import os
-    port = int(os.environ.get('PORT', 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🌐 Health server ativo na porta {port}")
-    server.serve_forever()
-
-# ==================== EXECUÇÃO ====================
-if __name__ == "__main__":
-    _start_time = time.time()
-    singularity = NeuroGenesisSingularityV40_04(capital_inicial=25000.0)
-    _singularity_ref[0] = singularity
-    singularity.start()
-    time.sleep(2)
-    try:
-        start_health_server()
-    except KeyboardInterrupt:
-        singularity.running = False
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛑 Encerrada.")
-    except Exception as e:
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ❌ Health server erro: {e}")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Mantendo vivo...")
-        while singularity.running:
-            time.sleep(60)
+            self.neuron_population.append(np
